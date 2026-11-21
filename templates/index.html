@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Image Classifier</title>
+<style>
+:root{--bg:#e9edf1;--panel:#fff;--ink:#172033;--muted:#5d6881;--line:#d3d9e3;--accent:#2457f5;--accent-ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#10151f;--panel:#1a2130;--ink:#e8ecf5;--muted:#9aa5bd;--line:#2b3448;--accent:#6c8cff;--accent-ink:#10151f}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:32px 20px 48px}
+header{display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px;margin-bottom:28px}
+h1{margin:0;font-size:clamp(1.8rem,4vw,2.6rem);letter-spacing:-.02em;font-weight:800}
+header p{margin:0;color:var(--muted)}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:28px}
+@media (max-width:760px){main{grid-template-columns:1fr}}
+.finder{position:relative;aspect-ratio:1;background:var(--panel);border-radius:6px;display:grid;place-items:center;overflow:hidden}
+.finder.drag{outline:3px dashed var(--accent);outline-offset:-8px}
+.finder img,.finder video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.finder .corner{position:absolute;width:34px;height:34px;border:4px solid var(--accent);pointer-events:none;z-index:2}
+.tl{top:12px;left:12px;border-right:0;border-bottom:0}.tr{top:12px;right:12px;border-left:0;border-bottom:0}
+.bl{bottom:12px;left:12px;border-right:0;border-top:0}.br{bottom:12px;right:12px;border-left:0;border-top:0}
+.hint{text-align:center;padding:0 40px;color:var(--muted)}
+.hint strong{display:block;color:var(--ink);font-size:1.15rem;margin-bottom:4px}
+.tabs{display:flex;gap:8px;margin-top:14px}
+button,.btn{font:inherit;font-weight:600;border:1px solid var(--line);background:var(--panel);color:var(--ink);padding:10px 16px;border-radius:6px;cursor:pointer}
+button[aria-pressed=true]{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+button:focus-visible,.btn:focus-visible,input:focus-visible+.btn{outline:3px solid var(--accent);outline-offset:2px}
+#file{position:absolute;opacity:0;width:1px;height:1px}
+.result{display:flex;flex-direction:column;gap:20px}
+.verdict{background:var(--panel);border-radius:6px;padding:22px 24px;min-height:128px}
+.verdict .label{font-size:clamp(2rem,5vw,3rem);font-weight:800;letter-spacing:-.02em;line-height:1.1;text-transform:capitalize}
+.verdict .sub{color:var(--muted);margin-top:6px}
+.verdict.error .label{font-size:1.2rem;font-weight:700;color:#c0392b}
+ul.bars{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:12px}
+ul.bars li{display:grid;grid-template-columns:96px 1fr 52px;align-items:center;gap:10px;font-size:.95rem}
+.name{text-transform:capitalize}.pct{text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+.track{height:10px;background:var(--line);border-radius:5px;overflow:hidden}
+.fill{height:100%;background:var(--accent);width:0;transition:width .25s}
+li:not(:first-child) .fill{opacity:.45}
+.classes{color:var(--muted);font-size:.9rem}
+@media (prefers-reduced-motion:reduce){.fill{transition:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Image Classifier</h1>
+    <p>
+      {% if metrics.test_accuracy %}CNN trained on CIFAR-10, {{ (metrics.test_accuracy*100)|round(1) }}% test accuracy{% else %}CNN trained on CIFAR-10{% endif %}
+    </p>
+  </header>
+
+  <main>
+    <section>
+      <div class="finder" id="finder">
+        <span class="corner tl"></span><span class="corner tr"></span><span class="corner bl"></span><span class="corner br"></span>
+        <div class="hint" id="hint"><strong>Drop an image here</strong>or choose a file below. Camera mode classifies live.</div>
+        <img id="preview" alt="Image being classified" hidden>
+        <video id="video" autoplay muted playsinline hidden></video>
+      </div>
+      <div class="tabs">
+        <button id="tab-upload" aria-pressed="true">Upload</button>
+        <button id="tab-cam" aria-pressed="false">Live camera</button>
+        <span id="upload-wrap"><input type="file" id="file" accept="image/*"><label class="btn" for="file">Choose image</label></span>
+      </div>
+    </section>
+
+    <section class="result" aria-live="polite">
+      <div class="verdict" id="verdict"><div class="sub">Add an image to see what the model thinks it is.</div></div>
+      <ul class="bars" id="bars"></ul>
+      <p class="classes">Recognises: {{ classes|join(", ") }}. Photos work best when one object fills the frame.</p>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const finder = $("finder"), preview = $("preview"), video = $("video"), hint = $("hint");
+let stream = null, timer = null, busy = false;
+
+function show(data) {
+  const v = $("verdict");
+  if (data.error) {
+    v.className = "verdict error";
+    v.innerHTML = `<div class="label"></div>`;
+    v.firstChild.textContent = data.error;
+    $("bars").innerHTML = "";
+    return;
+  }
+  const [top] = data.predictions;
+  v.className = "verdict";
+  v.innerHTML = `<div class="label"></div><div class="sub"></div>`;
+  v.children[0].textContent = top.label;
+  v.children[1].textContent = `${(top.confidence * 100).toFixed(1)}% confident`;
+  $("bars").innerHTML = data.predictions.map(p =>
+    `<li><span class="name">${p.label}</span><div class="track"><div class="fill" style="width:${(p.confidence*100).toFixed(1)}%"></div></div><span class="pct">${(p.confidence*100).toFixed(1)}%</span></li>`
+  ).join("");
+}
+
+async function classify(blob) {
+  const fd = new FormData();
+  fd.append("image", blob, "image.jpg");
+  try {
+    const r = await fetch("/api/predict", { method: "POST", body: fd });
+    show(await r.json());
+  } catch {
+    show({ error: "Can't reach the server. Check that app.py is still running." });
+  }
+}
+
+function useImage(file) {
+  if (!file) return;
+  stopCamera();
+  preview.src = URL.createObjectURL(file);
+  preview.hidden = false; hint.hidden = true;
+  classify(file);
+}
+
+async function startCamera() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+  } catch {
+    show({ error: "Camera access was blocked. Allow camera permission in your browser, then try again." });
+    setTab("upload"); return;
+  }
+  video.srcObject = stream;
+  video.hidden = false; preview.hidden = true; hint.hidden = true;
+  const canvas = document.createElement("canvas");
+  timer = setInterval(() => {
+    if (busy || !video.videoWidth) return;
+    canvas.width = 224; canvas.height = 224;
+    const s = Math.min(video.videoWidth, video.videoHeight);
+    canvas.getContext("2d").drawImage(video, (video.videoWidth - s) / 2, (video.videoHeight - s) / 2, s, s, 0, 0, 224, 224);
+    busy = true;
+    canvas.toBlob(async b => { await classify(b); busy = false; }, "image/jpeg", 0.85);
+  }, 600);
+}
+
+function stopCamera() {
+  clearInterval(timer);
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = null; video.hidden = true; video.srcObject = null;
+}
+
+function setTab(name) {
+  const cam = name === "cam";
+  $("tab-cam").setAttribute("aria-pressed", cam);
+  $("tab-upload").setAttribute("aria-pressed", !cam);
+  $("upload-wrap").hidden = cam;
+  if (cam) startCamera(); else stopCamera();
+}
+
+$("tab-upload").onclick = () => setTab("upload");
+$("tab-cam").onclick = () => setTab("cam");
+$("file").onchange = e => useImage(e.target.files[0]);
+["dragenter", "dragover"].forEach(ev => finder.addEventListener(ev, e => { e.preventDefault(); finder.classList.add("drag"); }));
+["dragleave", "drop"].forEach(ev => finder.addEventListener(ev, e => { e.preventDefault(); finder.classList.remove("drag"); }));
+finder.addEventListener("drop", e => { setTab("upload"); useImage(e.dataTransfer.files[0]); });
+</script>
+</body>
+</html>
